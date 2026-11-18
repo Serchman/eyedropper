@@ -24,6 +24,7 @@ The app opens two windows at startup, both defined in tauri.conf.json:
 1. Icon window ("icon")
    - About 72×72 px, frameless (no title bar), always on top, not shown in the taskbar, not resizable.
    - Created with `focus: false`, so it never takes keyboard focus when it appears.
+   - Uses `decorations: false`, `transparent: true` and `shadow: false`. Windows 11 adds a shadow and a thin border to undecorated windows, which would show a square frame around the round icon.
    - Transparent background with a round colored circle in the middle, showing a number.
    - The circle is white when no timer has run out, and red when at least one timer has run out. This is the same whether the main window is minimized or not.
    - The white circle must have a dark outline or shadow, so it stays visible over DrEryk's white screens.
@@ -31,7 +32,7 @@ The app opens two windows at startup, both defined in tauri.conf.json:
    - Turning red only changes the icon's CSS. It must never call `set_focus` or `show`, and it must not move or activate any window. This way, keystrokes the doctor types into DrEryk keep going to DrEryk.
    - Can be dragged anywhere on screen (use data-tauri-drag-region, but make sure a click without dragging still counts as a click).
    - Clicking it shows the main window, restores it if minimized, maximizes it, and brings it to focus.
-   - Its position is remembered between restarts (window-state plugin).
+   - Its position is remembered between restarts (window-state plugin). The plugin tracks only the icon window, and only its position (for example `StateFlags::POSITION`, with the main window excluded).
    - At startup, if the saved position is off-screen (e.g. an external monitor was unplugged), move it to a visible spot in the bottom-right corner of the primary monitor.
 
 2. Main window ("main")
@@ -58,7 +59,7 @@ Timers live in Rust:
 - Each window also asks Rust for the current state on startup, so it does not miss the first event.
 
 Consistency log:
-- Every 10 seconds, log to the dev console: Rust's ready count versus what each window currently shows, and for each expired timer, its expected turn-red time versus the actual turn-red time. I will use this to check behavior while the main window is minimized and after the laptop wakes from sleep.
+- Every 10 seconds, log to the terminal running `tauri dev`: Rust's ready count versus what each window currently shows, and for each expired timer, its expected turn-red time versus the actual turn-red time. Each window reports what it shows to Rust through a command, and Rust prints the comparison, because each webview has its own devtools and no single console sees both windows. I will use this to check behavior while the main window is minimized and after the laptop wakes from sleep.
 
 ## Settings placeholder
 
@@ -72,16 +73,16 @@ Consistency log:
 
 - single-instance: starting the app a second time just shows the main window.
 - autostart: the checkbox "Uruchamiaj z Windows" in the settings panel enables or disables starting with Windows.
-- window-state: remembers the icon window position.
+- window-state: remembers only the icon window position (main window excluded).
 - store (`tauri-plugin-store`): saves the "Czas oczekiwania, min" setting.
 
 ## Security (important: this will run on a doctor's computer with patient data)
 
-- Capabilities: allow only what's needed for the above (window show, hide, minimize, maximize, unminimize, set focus, start dragging, events, and the four plugins: single-instance, autostart, window-state, store). The capability for the store plugin must be limited to the store plugin only. No HTTP, no shell, no file system, no other plugins.
-- A strict Content Security Policy: no remote resources at all, only the app's own files.
+- Capabilities: allow only what's needed for the above (window show, hide, minimize, maximize, unminimize, set focus, start dragging, events, and the four plugins: single-instance, autostart, window-state, store). The plugin permissions are for autostart, window-state and store; single-instance is Rust-only (no capability entry). Grant store permissions only to the main window, and don't add the fs plugin. No HTTP, no shell, no file-system plugin (the frontend cannot read or write arbitrary files), no other plugins.
+- A strict Content Security Policy: no remote resources at all, only the app's own files. For example `default-src 'self'; connect-src ipc: http://ipc.localhost`, so Tauri IPC works.
 - Installer: NSIS, per-user install (installMode "currentUser"), so no admin rights are needed.
-- Patient data: patient labels (initials or first name only) are kept only in memory and are gone when the app quits. The only files the app writes are the settings file (store plugin) and the icon position file (window-state plugin).
-- Explain in the README what the app can and cannot access, in plain language. Include the points above: the list of allowed plugins (including store), that labels exist only in memory, and which two files are written.
+- Patient data: patient labels (initials or first name only) are kept only in memory and are gone when the app quits. The only files the app itself writes are the settings file (store plugin) and the icon position file (window-state plugin). WebView2 also keeps its own profile folder (cache and local storage, under %LOCALAPPDATA%\<identifier>\EBWebView), and autostart adds one registry entry under HKCU\...\Run. None of these hold patient labels.
+- Explain in the README what the app can and cannot access, in plain language. Include the points above: the list of allowed plugins (including store), that labels exist only in memory, which two files the app writes, and the WebView2 profile folder and the autostart registry entry.
 
 ## Test checklist
 
