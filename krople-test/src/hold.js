@@ -1,6 +1,10 @@
-// Press-and-hold buttons. A card action only happens after the button has
-// been held down for HOLD_MS, so a stray click never marks a drop or
-// removes a patient. A plain click does nothing.
+// Press-and-hold buttons. A card action (or "Zakończ") only happens after the
+// button has been held down for HOLD_MS, so a stray click never marks a drop,
+// removes a patient or quits the app. A plain click does nothing.
+//
+// For touch screens the CSS gives every hold button `touch-action: none`, so
+// a held finger is not taken over as a scroll gesture (which would cancel
+// the pointer and with it the hold).
 //
 // While held, the button has the class "holding"; the CSS draws a fill
 // that grows from the left over var(--hold-ms) (keep it equal to HOLD_MS).
@@ -50,6 +54,10 @@ export function holdToConfirm(button, onConfirm) {
   for (const type of ["pointerup", "pointerleave", "pointercancel", "blur"]) {
     button.addEventListener(type, reset);
   }
+
+  // A long touch press would open the context menu (and cancel the
+  // pointer). Hold buttons have no menu.
+  button.addEventListener("contextmenu", (e) => e.preventDefault());
 
   button.addEventListener("keydown", (e) => {
     if (!isHoldKey(e)) return;

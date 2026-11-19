@@ -10,26 +10,38 @@
 
 mod timers;
 
+use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, PhysicalPosition, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartExt};
 use tauri_plugin_store::StoreExt;
 use tauri_plugin_window_state::{AppHandleExt, StateFlags, WindowExt};
 
 use timers::{Durations, TimerState};
 
-/// The settings file, saved by the store plugin in the app's data folder.
-/// It only ever holds settings, never patient data.
 /// Launch argument the autostart entry passes, so a Windows-login start shows
 /// only the icon while a manual start also opens the main window.
 const AUTOSTART_ARG: &str = "--autostart";
+
+/// The settings file, saved by the store plugin in the app's data folder.
+/// It only ever holds settings, never patient data.
 const SETTINGS_FILE: &str = "settings.json";
+
+/// "Czas oczekiwania, min": store key, default and allowed range.
 const WAIT_MINUTES_KEY: &str = "waitMinutes";
 const DEFAULT_WAIT_MINUTES: u32 = 15;
+const WAIT_RANGE: RangeInclusive<u32> = 1..=120;
+
+/// "Odstęp między kroplami, min": store key, default and allowed range.
 const INTERVAL_MINUTES_KEY: &str = "intervalMinutes";
 const DEFAULT_INTERVAL_MINUTES: u32 = 10;
+const INTERVAL_RANGE: RangeInclusive<u32> = 1..=60;
+
+/// Event sent to the main window each time `show_main_window` brings it up,
+/// so it can leave the settings view and be ready for a new patient.
+const MAIN_SHOWN_EVENT: &str = "main-shown";
 
 /// The window-state plugin remembers only the icon window, and only its
 /// position.
@@ -106,6 +118,7 @@ fn show_main_window(app: &AppHandle) {
         let _ = main.unminimize();
         let _ = main.maximize();
         let _ = main.set_focus();
+        let _ = main.emit_to("main", MAIN_SHOWN_EVENT, ());
     }
 }
 
@@ -192,31 +205,43 @@ struct Settings {
     autostart: bool,
 }
 
-/// Reads one "minutes" setting, falling back to `default` when the store or
-/// the value is missing.
-fn read_minutes(app: &AppHandle, key: &str, default: u32) -> u32 {
-    app.store(SETTINGS_FILE)
-        .ok()
-        .and_then(|store| store.get(key))
+/// A stored "minutes" value if it is a whole number within `range`;
+/// otherwise `default`. The file could have been edited by hand or written by
+/// another version, so a value like 0 or 999 must never become a phase length.
+fn minutes_or_default(value: Option<&serde_json::Value>, range: RangeInclusive<u32>, default: u32) -> u32 {
+    value
         .and_then(|v| v.as_u64())
-        .map(|v| v as u32)
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| range.contains(v))
         .unwrap_or(default)
+}
+
+/// Reads one "minutes" setting, falling back to `default` when the store or
+/// the value is missing or out of `range`.
+fn read_minutes(app: &AppHandle, key: &str, range: RangeInclusive<u32>, default: u32) -> u32 {
+    let value = app.store(SETTINGS_FILE).ok().and_then(|store| store.get(key));
+    minutes_or_default(value.as_ref(), range, default)
+}
+
+fn read_interval_minutes(app: &AppHandle) -> u32 {
+    read_minutes(app, INTERVAL_MINUTES_KEY, INTERVAL_RANGE, DEFAULT_INTERVAL_MINUTES)
+}
+
+fn read_wait_minutes(app: &AppHandle) -> u32 {
+    read_minutes(app, WAIT_MINUTES_KEY, WAIT_RANGE, DEFAULT_WAIT_MINUTES)
 }
 
 /// The phase lengths a phase starting right now should use.
 pub(crate) fn current_durations(app: &AppHandle) -> Durations {
-    let minutes = |key, default| Duration::from_secs(read_minutes(app, key, default) as u64 * 60);
-    Durations {
-        interval: minutes(INTERVAL_MINUTES_KEY, DEFAULT_INTERVAL_MINUTES),
-        wait: minutes(WAIT_MINUTES_KEY, DEFAULT_WAIT_MINUTES),
-    }
+    let minutes = |m: u32| Duration::from_secs(u64::from(m) * 60);
+    Durations { interval: minutes(read_interval_minutes(app)), wait: minutes(read_wait_minutes(app)) }
 }
 
 /// Loads the settings for the settings panel.
 #[tauri::command]
 fn get_settings(app: AppHandle) -> Result<Settings, String> {
-    let interval_minutes = read_minutes(&app, INTERVAL_MINUTES_KEY, DEFAULT_INTERVAL_MINUTES);
-    let wait_minutes = read_minutes(&app, WAIT_MINUTES_KEY, DEFAULT_WAIT_MINUTES);
+    let interval_minutes = read_interval_minutes(&app);
+    let wait_minutes = read_wait_minutes(&app);
     let autostart = app.autolaunch().is_enabled().unwrap_or(false);
     Ok(Settings { interval_minutes, wait_minutes, autostart })
 }
@@ -225,7 +250,7 @@ fn get_settings(app: AppHandle) -> Result<Settings, String> {
 /// after the change use it.
 #[tauri::command]
 fn set_interval_minutes(app: AppHandle, minutes: u32) -> Result<(), String> {
-    if !(1..=60).contains(&minutes) {
+    if !INTERVAL_RANGE.contains(&minutes) {
         return Err("value out of range".into());
     }
     let store = app.store(SETTINGS_FILE).map_err(|e| e.to_string())?;
@@ -236,7 +261,7 @@ fn set_interval_minutes(app: AppHandle, minutes: u32) -> Result<(), String> {
 /// Saves "Czas oczekiwania, min" to the settings file.
 #[tauri::command]
 fn set_wait_minutes(app: AppHandle, minutes: u32) -> Result<(), String> {
-    if !(1..=120).contains(&minutes) {
+    if !WAIT_RANGE.contains(&minutes) {
         return Err("value out of range".into());
     }
     let store = app.store(SETTINGS_FILE).map_err(|e| e.to_string())?;
@@ -250,4 +275,37 @@ fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
     let launcher = app.autolaunch();
     let result = if enabled { launcher.enable() } else { launcher.disable() };
     result.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn minutes_in_range_are_kept() {
+        assert_eq!(minutes_or_default(Some(&json!(1)), INTERVAL_RANGE, 10), 1);
+        assert_eq!(minutes_or_default(Some(&json!(60)), INTERVAL_RANGE, 10), 60);
+        assert_eq!(minutes_or_default(Some(&json!(120)), WAIT_RANGE, 15), 120);
+    }
+
+    #[test]
+    fn missing_or_bad_minutes_fall_back_to_default() {
+        let bad = [
+            json!(0),
+            json!(61),
+            json!(999),
+            json!(u64::MAX),
+            json!(u64::from(u32::MAX) + 5), // would wrap to 4 with `as u32`
+            json!(-5),
+            json!(12.5),
+            json!("12"),
+            json!(null),
+        ];
+        for v in &bad {
+            assert_eq!(minutes_or_default(Some(v), INTERVAL_RANGE, 10), 10, "value {v}");
+        }
+        assert_eq!(minutes_or_default(None, INTERVAL_RANGE, 10), 10);
+        assert_eq!(minutes_or_default(Some(&json!(121)), WAIT_RANGE, 15), 15);
+    }
 }

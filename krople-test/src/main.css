@@ -33,7 +33,30 @@
   --button-border: #C3C9D1;
   /* How long a card button must be held. Keep equal to HOLD_MS in hold.js. */
   --hold-ms: 1500ms;
+
+  /* Vertical spacing. On short viewports (1080p at 125% / 150% Windows
+     scaling leaves roughly 800 / 650 CSS px) it is tightened below, so a
+     whole card, action button included, fits without scrolling. */
+  --page-pad-top: 40px;
+  --page-pad-bottom: 48px;
+  --page-gap: 40px;
+  /* Height of the add row: label (16px text) + 8px gap + 72px controls. */
+  --add-row-height: 100px;
+  --card-pad-y: 28px;
+  --card-gap: 24px;
+  --card-action-height: 76px;
   color-scheme: light;
+}
+
+@media (max-height: 860px) {
+  :root {
+    --page-pad-top: 24px;
+    --page-pad-bottom: 24px;
+    --page-gap: 24px;
+    --card-pad-y: 16px;
+    --card-gap: 10px;
+    --card-action-height: 64px;
+  }
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -62,10 +85,10 @@ button:focus-visible {
 
 .page {
   min-height: 100vh;
-  padding: 40px 48px 48px;
+  padding: var(--page-pad-top) 48px var(--page-pad-bottom);
   display: flex;
   flex-direction: column;
-  gap: 40px;
+  gap: var(--page-gap);
 }
 
 /* ---- Add row ---------------------------------------------------------- */
@@ -174,14 +197,16 @@ button:focus-visible {
      overflows a narrow card. */
   container-type: inline-size;
   position: relative;
-  min-height: 700px;
-  padding: 28px 24px;
+  /* 700px as in the mockup (fits at 1080p, 100%), but never taller than the
+     space below the add row, so the action button is never below the fold. */
+  min-height: min(700px, calc(100vh - var(--page-pad-top) - var(--add-row-height) - var(--page-gap) - var(--page-pad-bottom)));
+  padding: var(--card-pad-y) 24px;
   border: 4px solid var(--card-border);
   background: var(--card-bg);
   border-radius: 16px;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: var(--card-gap);
 }
 .card.red {
   border-color: var(--red);
@@ -240,9 +265,12 @@ button:focus-visible {
 }
 .card.red .card-remove { color: var(--red-muted); }
 
+/* 200px wide at most. On short viewports it also shrinks with the height,
+   down to 80px: 555px is the rest of the page and card at the tightened
+   spacing (worst case: a two-line status), so at ~650px the card still
+   ends above the bottom edge. */
 .pie {
-  width: 100%;
-  max-width: 200px;
+  width: min(100%, 200px, max(80px, calc(100vh - 555px)));
   height: auto;
   align-self: center;
 }
@@ -250,7 +278,8 @@ button:focus-visible {
 .card.red .pie-wedge { display: none; }
 
 .card-time {
-  font-size: min(clamp(64px, 6vw, 96px), 34cqi);
+  /* 10vh only matters on short viewports (about 65px at 650px tall). */
+  font-size: min(clamp(64px, 6vw, 96px), 34cqi, 10vh);
   font-weight: 700;
   line-height: 1;
   letter-spacing: -0.03em;
@@ -298,7 +327,7 @@ button:focus-visible {
 .card-action {
   position: relative;
   overflow: hidden;
-  height: 76px;
+  height: var(--card-action-height);
   font-size: 26px;
   font-weight: 600;
   color: var(--muted);
@@ -315,23 +344,35 @@ button:focus-visible {
 }
 
 /* ---- Press and hold (hold.js) ------------------------------------------
-   While a card button is held it has the class "holding": a fill layer
-   grows from the left over --hold-ms. Removing the class snaps it back.
-   The layer sits behind the text (z-index -1 inside the button's own
-   stacking context) but above the button's background. */
+   Card buttons and "Zakończ". While held a button has the class "holding":
+   a fill layer grows from the left over --hold-ms. Removing the class snaps
+   it back. The layer sits behind the text (z-index -1 inside the button's
+   own stacking context) but above the button's background.
+   touch-action: none keeps a held finger from being taken over as a scroll
+   or zoom gesture, which would cancel the pointer and with it the hold. */
 
 .card-action,
-.card-remove {
+.card-remove,
+#btn-quit {
   isolation: isolate;
   user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
   --hold-fill: rgba(17, 20, 24, 0.18);
 }
 /* Darker on the red button: white text keeps (more than) its contrast. */
 .card.red .card-action { --hold-fill: rgba(0, 0, 0, 0.4); }
 .card.red .card-remove { --hold-fill: rgba(90, 58, 58, 0.25); }
+/* "Zakończ" is dark with white text: a light fill. */
+#btn-quit {
+  position: relative;
+  overflow: hidden;
+  --hold-fill: rgba(255, 255, 255, 0.35);
+}
 
 .card-action::before,
-.card-remove::before {
+.card-remove::before,
+#btn-quit::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -341,7 +382,8 @@ button:focus-visible {
   transform-origin: left center;
 }
 .card-action.holding::before,
-.card-remove.holding::before {
+.card-remove.holding::before,
+#btn-quit.holding::before {
   transform: scaleX(1);
   transition: transform var(--hold-ms) linear;
 }

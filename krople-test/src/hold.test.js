@@ -151,3 +151,9 @@ test("holdInProgress is true only while some button is held", (t) => {
   t.mock.timers.tick(HOLD_MS); // removed mid-hold: still cleared
   assert.equal(holdInProgress(), false);
 });
+
+test("the right-click / long-press menu is blocked on hold buttons", (t) => {
+  const { button } = setup(t);
+  const e = fire(button, "contextmenu");
+  assert.ok(e.defaultPrevented);
+});

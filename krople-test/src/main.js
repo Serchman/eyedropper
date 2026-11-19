@@ -5,6 +5,7 @@
 
 import { cardView, PIE_CIRCUMFERENCE } from "./card.js";
 import { holdToConfirm, holdInProgress } from "./hold.js";
+import { isOutdated } from "./state.js";
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -37,6 +38,13 @@ function logError(err) {
   console.error(err);
 }
 
+// Runs a confirmed card command. Afterwards the name field gets the focus
+// back, so the next initials can be typed right away: otherwise focus would
+// stay on the card button, or fall to <body> when the card is removed.
+function cardCommand(command, id) {
+  invoke(command, { id }).catch(logError).finally(focusName);
+}
+
 // Called once for every new card, after it is in the page. Both card
 // buttons only act after a press-and-hold (see hold.js).
 function onCardCreated(refs, id) {
@@ -44,10 +52,9 @@ function onCardCreated(refs, id) {
     const p = latest?.patients.find((q) => q.id === id);
     if (!p) return;
     // "Zbadany" removes the card; "Zakropione" (also early) marks a drop.
-    const command = cardView(p, latest.now).isWait ? "remove_patient" : "mark_drop";
-    invoke(command, { id }).catch(logError);
+    cardCommand(cardView(p, latest.now).isWait ? "remove_patient" : "mark_drop", id);
   });
-  holdToConfirm(refs.remove, () => invoke("remove_patient", { id }).catch(logError));
+  holdToConfirm(refs.remove, () => cardCommand("remove_patient", id));
 }
 
 function el(tag, className, text) {
@@ -150,6 +157,9 @@ function updateCard(refs, p, now) {
 }
 
 function render(state) {
+  // A tick snapshot can arrive after the broadcast of a newer change; drawing
+  // it would, e.g., bring a just-removed card back for a second.
+  if (isOutdated(latest, state)) return;
   latest = state;
   const seen = new Set();
   for (const p of state.patients) {
@@ -180,16 +190,10 @@ function updateEmpty() {
   empty.hidden = cards.size > 0 || !settingsView.hidden;
 }
 
-let gotEvent = false;
-listen("state", (event) => {
-  gotEvent = true;
-  render(event.payload);
-});
+listen("state", (event) => render(event.payload));
 // Ask for the current state right away, so we don't miss the first event.
-// If an event got here first, the reply is older than what is drawn.
-invoke("get_state").then((state) => {
-  if (!gotEvent) render(state);
-});
+// If an event got here first, render() drops the older reply (rev/now).
+invoke("get_state").then(render);
 
 // ---- Add row -------------------------------------------------------------
 
@@ -294,8 +298,9 @@ autostartBox.addEventListener("change", async () => {
   }
 });
 
-// "Zakończ" is a normal click: the only way to quit the app.
-$("btn-quit").addEventListener("click", () => invoke("quit_app").catch(logError));
+// "Zakończ" is the only way to quit, and quitting loses every patient, so it
+// is press-and-hold like the card buttons: a plain click does nothing.
+holdToConfirm($("btn-quit"), () => invoke("quit_app").catch(logError));
 
 function showSettings(open) {
   settingsView.hidden = !open;
@@ -331,4 +336,12 @@ function focusName() {
 focusName();
 getCurrentWindow().onFocusChanged(({ payload: focused }) => {
   if (focused) focusName();
+});
+
+// Rust sends "main-shown" each time the icon (or a second launch) brings the
+// window up. Settings left open before the window was hidden must not block
+// adding a patient, so go back to the cards. Not during a hold: hiding the
+// settings view would blur a held "Zakończ" and cancel it.
+listen("main-shown", () => {
+  if (!settingsView.hidden && !holdInProgress()) showSettings(false);
 });

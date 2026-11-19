@@ -10,7 +10,7 @@
 //!
 //! So Rust owns the one true list of patients. A plain Rust thread is not
 //! throttled. About once a second it works out which patients are due and
-//! sends ONE `state` event with `{ patients, ready_count, now }` to BOTH
+//! sends ONE `state` event with `{ patients, ready_count, now, rev }` to BOTH
 //! windows. The windows never keep their own timers. They only draw what they
 //! receive.
 //!
@@ -115,6 +115,8 @@ fn give_drop(p: &mut Patient, now: SystemTime, d: Durations) -> Result<(), Strin
 struct Inner {
     patients: Vec<Patient>,
     next_id: u64,
+    /// Goes up by one on every change to the patient list. See `StatePayload::rev`.
+    rev: u64,
     /// Set when the icon window moved, so the ticker saves its position.
     icon_moved: bool,
 }
@@ -151,6 +153,12 @@ pub struct StatePayload {
     /// Rust's "now". Windows compute remaining time as `phase_ends_at - now`,
     /// so both windows and Rust always agree on which patients are due.
     now: u64,
+    /// Version of the patient list. Snapshots are taken under the lock but
+    /// sent after it is released, so a tick's snapshot can arrive after the
+    /// broadcast of a newer change. The windows drop any payload whose `rev`
+    /// is lower than the one they last drew. Ticks without changes repeat the
+    /// rev (with a newer `now`).
+    rev: u64,
 }
 
 fn ms(t: SystemTime) -> u64 {
@@ -173,13 +181,42 @@ impl Inner {
             })
             .collect();
         let ready_count = patients.iter().filter(|p| p.ready).count();
-        StatePayload { patients, ready_count, now: ms(now) }
+        StatePayload { patients, ready_count, now: ms(now), rev: self.rev }
+    }
+
+    /// Adds a patient whose first drop was just given.
+    fn add(&mut self, label: String, protocol: Protocol, now: SystemTime, d: Durations) {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.patients.push(new_patient(id, label, protocol, now, d));
+        self.rev += 1;
+    }
+
+    /// "Zakropione" for patient `id`.
+    fn mark_drop(&mut self, id: u64, now: SystemTime, d: Durations) -> Result<(), String> {
+        let patient = self.patients.iter_mut().find(|p| p.id == id).ok_or("unknown patient")?;
+        give_drop(patient, now, d)?;
+        self.rev += 1;
+        Ok(())
+    }
+
+    /// Removes patient `id`. Returns false (and changes nothing) if unknown.
+    fn remove(&mut self, id: u64) -> bool {
+        let before = self.patients.len();
+        self.patients.retain(|p| p.id != id);
+        let removed = self.patients.len() != before;
+        if removed {
+            self.rev += 1;
+        }
+        removed
     }
 }
 
 /// Sends the current state to both windows right away (used after a button
 /// press, so the UI doesn't wait up to a second for the next tick).
 fn broadcast(app: &AppHandle) {
+    // The temporary lock guard is dropped at the end of this statement, so
+    // the emit below never runs while the lock is held.
     let payload = app.state::<TimerState>().0.lock().unwrap().snapshot(SystemTime::now());
     // `emit` sends to every window. Both windows listen for "state".
     let _ = app.emit("state", payload);
@@ -196,7 +233,9 @@ pub fn start_ticker(app: AppHandle) {
             let payload = inner.snapshot(SystemTime::now());
             let moved = std::mem::take(&mut inner.icon_moved);
             (payload, moved)
-        };
+        }; // the lock is released here; the emit runs without it
+        // This snapshot may reach the windows after a newer broadcast from a
+        // command; its lower `rev` makes the windows ignore it.
         let _ = app.emit("state", payload);
 
         if icon_moved {
@@ -229,12 +268,9 @@ pub fn add_patient(
     // Read the settings BEFORE taking the lock, so file access never blocks
     // the ticker.
     let durations = crate::current_durations(&app);
-    {
-        let mut inner = state.0.lock().unwrap();
-        inner.next_id += 1;
-        let id = inner.next_id;
-        inner.patients.push(new_patient(id, label, protocol, SystemTime::now(), durations));
-    } // the lock is released here, before broadcast() locks again
+    state.0.lock().unwrap().add(label, protocol, SystemTime::now(), durations);
+    // The lock was released at the end of the line above, before broadcast()
+    // locks again.
     broadcast(&app);
     Ok(())
 }
@@ -243,11 +279,7 @@ pub fn add_patient(
 #[tauri::command]
 pub fn mark_drop(app: AppHandle, state: tauri::State<TimerState>, id: u64) -> Result<(), String> {
     let durations = crate::current_durations(&app);
-    {
-        let mut inner = state.0.lock().unwrap();
-        let patient = inner.patients.iter_mut().find(|p| p.id == id).ok_or("unknown patient")?;
-        give_drop(patient, SystemTime::now(), durations)?;
-    }
+    state.0.lock().unwrap().mark_drop(id, SystemTime::now(), durations)?;
     broadcast(&app);
     Ok(())
 }
@@ -255,7 +287,7 @@ pub fn mark_drop(app: AppHandle, state: tauri::State<TimerState>, id: u64) -> Re
 /// "Zbadany" / "x": removes one patient.
 #[tauri::command]
 pub fn remove_patient(app: AppHandle, state: tauri::State<TimerState>, id: u64) {
-    state.0.lock().unwrap().patients.retain(|p| p.id != id);
+    state.0.lock().unwrap().remove(id);
     broadcast(&app);
 }
 
@@ -370,6 +402,53 @@ mod tests {
         assert!(validate_label(&"ą".repeat(20)).is_ok());
         assert!(validate_label(&"ą".repeat(21)).is_err());
         assert!(validate_label(&"a".repeat(21)).is_err());
+    }
+
+    #[test]
+    fn rev_bumps_on_every_list_change() {
+        let mut inner = Inner::default();
+        assert_eq!(inner.snapshot(t0()).rev, 0);
+
+        inner.add("A".into(), Protocol::Three, t0(), d());
+        assert_eq!(inner.rev, 1);
+        inner.add("B".into(), Protocol::One, t0(), d());
+        assert_eq!(inner.rev, 2);
+        let id = inner.patients[0].id;
+
+        inner.mark_drop(id, t0() + s(10), d()).unwrap();
+        assert_eq!(inner.rev, 3);
+        assert!(inner.remove(id));
+        assert_eq!(inner.rev, 4);
+        assert_eq!(inner.patients.len(), 1);
+    }
+
+    #[test]
+    fn rev_unchanged_when_nothing_changes() {
+        let mut inner = Inner::default();
+        inner.add("A".into(), Protocol::One, t0(), d());
+        let id = inner.patients[0].id;
+
+        // A refused drop (1-drop protocol) and an unknown id change nothing.
+        assert!(inner.mark_drop(id, t0(), d()).is_err());
+        assert!(inner.mark_drop(id + 99, t0(), d()).is_err());
+        assert!(!inner.remove(id + 99));
+        assert_eq!(inner.rev, 1);
+
+        // Ticks without changes repeat the rev, with a newer `now`.
+        let a = inner.snapshot(t0());
+        let b = inner.snapshot(t0() + s(1));
+        assert_eq!((a.rev, b.rev), (1, 1));
+        assert!(b.now > a.now);
+    }
+
+    #[test]
+    fn snapshot_json_has_rev() {
+        let mut inner = Inner::default();
+        inner.add("A".into(), Protocol::One, t0(), d());
+        let json = serde_json::to_value(inner.snapshot(t0())).unwrap();
+        assert_eq!(json["rev"], 1);
+        assert_eq!(json["ready_count"], 0);
+        assert_eq!(json["patients"][0]["ready"], false);
     }
 
     #[test]
