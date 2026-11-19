@@ -4,7 +4,7 @@
 //!   - "icon": the small round floating icon (always on top, no taskbar entry)
 //!   - "main": the normal app window
 //!
-//! This file wires up the plugins, the window behavior (close = quit, icon
+//! This file wires up the plugins, the window behavior (close = hide, icon
 //! position) and the small commands the windows call. The timers themselves
 //! are in `timers.rs`.
 
@@ -22,6 +22,9 @@ use timers::{Durations, TimerState};
 
 /// The settings file, saved by the store plugin in the app's data folder.
 /// It only ever holds settings, never patient data.
+/// Launch argument the autostart entry passes, so a Windows-login start shows
+/// only the icon while a manual start also opens the main window.
+const AUTOSTART_ARG: &str = "--autostart";
 const SETTINGS_FILE: &str = "settings.json";
 const WAIT_MINUTES_KEY: &str = "waitMinutes";
 const DEFAULT_WAIT_MINUTES: u32 = 15;
@@ -42,7 +45,7 @@ pub fn run() {
         }))
         // Autostart adds or removes one registry entry under
         // HKCU\Software\Microsoft\Windows\CurrentVersion\Run.
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![AUTOSTART_ARG])))
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(
             tauri_plugin_window_state::Builder::new()
@@ -65,15 +68,20 @@ pub fn run() {
         ])
         .setup(|app| {
             ensure_icon_on_screen(app.handle());
+            // The main window is created hidden so there is no flash. A manual
+            // launch shows it now; an autostart launch shows only the icon.
+            if !std::env::args().any(|a| a == AUTOSTART_ARG) {
+                show_main_window(app.handle());
+            }
             timers::start_ticker(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| match (window.label(), event) {
-            // Closing the main window with X quits the whole app, the same as
-            // the "Zakończ" button. Without this, the icon window would keep
-            // the app running with no main window.
-            ("main", WindowEvent::CloseRequested { .. }) => {
-                window.app_handle().exit(0);
+            // X / Alt+F4 on the main window only hides it; the icon reopens it.
+            // "Zakończ" (quit_app) is the only way to quit.
+            ("main", WindowEvent::CloseRequested { api, .. }) => {
+                api.prevent_close();
+                let _ = window.hide();
             }
             // The icon window can't be closed either (e.g. Alt+F4 on it).
             ("icon", WindowEvent::CloseRequested { api, .. }) => {
