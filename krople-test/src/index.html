@@ -29,8 +29,31 @@
     <div id="cards" class="cards"></div>
     <p id="empty" class="empty">Brak pacjentów</p>
 
-    <!-- Filled in by the settings task; hidden until the gear is used. -->
-    <section id="settings-view" class="settings-view" hidden></section>
+    <!-- Shown in place of the cards when the gear is used. -->
+    <section id="settings-view" class="settings-view" aria-labelledby="settings-title" hidden>
+      <div class="settings-head">
+        <h2 id="settings-title" class="settings-title">Ustawienia</h2>
+        <button id="btn-back" class="add-btn btn-secondary" type="button">Wróć</button>
+      </div>
+      <div class="settings-fields">
+        <div class="field">
+          <label for="interval-minutes">Odstęp między kroplami, min</label>
+          <input id="interval-minutes" class="number-input" type="number" min="1" max="60" step="1" inputmode="numeric">
+        </div>
+        <div class="field">
+          <label for="wait-minutes">Czas oczekiwania, min</label>
+          <input id="wait-minutes" class="number-input" type="number" min="1" max="120" step="1" inputmode="numeric">
+        </div>
+      </div>
+      <label class="check">
+        <input id="autostart" type="checkbox">
+        Uruchamiaj z Windows
+      </label>
+      <p id="settings-status" class="settings-status" role="status"></p>
+      <div class="settings-quit">
+        <button id="btn-quit" class="add-btn" type="button">Zakończ</button>
+      </div>
+    </section>
   </main>
 </body>
 </html>

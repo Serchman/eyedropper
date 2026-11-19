@@ -31,6 +31,8 @@
   --card-bg: #F4F6F9;
   --card-border: #DCE1E7;
   --button-border: #C3C9D1;
+  /* How long a card button must be held. Keep equal to HOLD_MS in hold.js. */
+  --hold-ms: 1500ms;
   color-scheme: light;
 }
 
@@ -47,6 +49,11 @@ body {
 }
 
 button, input { font-family: inherit; }
+
+input:focus-visible {
+  outline: 3px solid var(--ink);
+  outline-offset: 3px;
+}
 
 button:focus-visible {
   outline: 3px solid var(--ink);
@@ -113,6 +120,19 @@ button:focus-visible {
   cursor: pointer;
 }
 
+/* Add row while the settings view is open. */
+.add-btn:disabled,
+#name:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Outlined variant ("Wróć"). */
+.btn-secondary {
+  color: var(--ink);
+  background: #FFFFFF;
+}
+
 .spacer { flex: 1 1 0; }
 
 .icon-btn {
@@ -134,7 +154,10 @@ button:focus-visible {
 
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  /* auto-fill, not auto-fit: empty columns keep their place, so one or two
+     patients get normal card-sized columns instead of being stretched
+     across the whole maximized window. */
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 24px;
 }
 
@@ -173,6 +196,9 @@ button:focus-visible {
   justify-content: space-between;
   align-items: baseline;
   column-gap: 12px;
+  /* Room for the "×" in the corner: a long name wraps before it reaches
+     the button, so pressing near the end of a name never hits "×". */
+  padding-right: 20px;
 }
 
 .card-name {
@@ -286,4 +312,116 @@ button:focus-visible {
   color: #FFFFFF;
   background: var(--red-dark);
   border-color: var(--red-dark);
+}
+
+/* ---- Press and hold (hold.js) ------------------------------------------
+   While a card button is held it has the class "holding": a fill layer
+   grows from the left over --hold-ms. Removing the class snaps it back.
+   The layer sits behind the text (z-index -1 inside the button's own
+   stacking context) but above the button's background. */
+
+.card-action,
+.card-remove {
+  isolation: isolate;
+  user-select: none;
+  --hold-fill: rgba(17, 20, 24, 0.18);
+}
+/* Darker on the red button: white text keeps (more than) its contrast. */
+.card.red .card-action { --hold-fill: rgba(0, 0, 0, 0.4); }
+.card.red .card-remove { --hold-fill: rgba(90, 58, 58, 0.25); }
+
+.card-action::before,
+.card-remove::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--hold-fill);
+  transform: scaleX(0);
+  transform-origin: left center;
+}
+.card-action.holding::before,
+.card-remove.holding::before {
+  transform: scaleX(1);
+  transition: transform var(--hold-ms) linear;
+}
+
+/* ---- Settings view ---------------------------------------------------- */
+
+.settings-view {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 32px;
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+}
+
+.settings-title {
+  margin: 0;
+  font-size: 34px;
+  font-weight: 700;
+}
+
+.settings-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 32px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.field label {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.number-input {
+  width: 200px;
+  height: 72px;
+  padding: 0 20px;
+  font-size: 26px;
+  border: 2px solid var(--ink);
+  border-radius: 12px;
+  color: var(--ink);
+  background: #FFFFFF;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 72px;
+  font-size: 26px;
+  cursor: pointer;
+}
+.check input {
+  width: 32px;
+  height: 32px;
+  margin: 0;
+  accent-color: var(--ink);
+  cursor: pointer;
+}
+
+.settings-status {
+  margin: 0;
+  min-height: 1.4em;
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+/* Quit is set apart from the settings so it is not hit by accident. */
+.settings-quit {
+  align-self: stretch;
+  padding-top: 32px;
+  border-top: 2px solid var(--card-border);
 }

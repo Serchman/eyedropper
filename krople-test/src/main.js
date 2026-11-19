@@ -4,6 +4,7 @@
 // that Rust sends about once a second (see src-tauri/src/timers.rs for why).
 
 import { cardView, PIE_CIRCUMFERENCE } from "./card.js";
+import { holdToConfirm } from "./hold.js";
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -28,9 +29,26 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 /** @type {Map<number, object>} patient id -> card refs (see createCard) */
 const cards = new Map();
 
-// Called once for every new card, after it is in the page. The card
-// buttons get their press-and-hold behaviour here (next task).
-function onCardCreated(refs, id) {}
+// The last state drawn. A held button reads it when the hold completes, so
+// it acts on what the card shows now, not on what it showed at creation.
+let latest = null;
+
+function logError(err) {
+  console.error(err);
+}
+
+// Called once for every new card, after it is in the page. Both card
+// buttons only act after a press-and-hold (see hold.js).
+function onCardCreated(refs, id) {
+  holdToConfirm(refs.action, () => {
+    const p = latest?.patients.find((q) => q.id === id);
+    if (!p) return;
+    // "Zbadany" removes the card; "Zakropione" (also early) marks a drop.
+    const command = cardView(p, latest.now).isWait ? "remove_patient" : "mark_drop";
+    invoke(command, { id }).catch(logError);
+  });
+  holdToConfirm(refs.remove, () => invoke("remove_patient", { id }).catch(logError));
+}
 
 function el(tag, className, text) {
   const e = document.createElement(tag);
@@ -132,6 +150,7 @@ function updateCard(refs, p, now) {
 }
 
 function render(state) {
+  latest = state;
   const seen = new Set();
   for (const p of state.patients) {
     seen.add(p.id);
@@ -154,7 +173,11 @@ function render(state) {
       cards.delete(id);
     }
   }
-  empty.hidden = state.patients.length > 0 || !settingsView.hidden;
+  updateEmpty();
+}
+
+function updateEmpty() {
+  empty.hidden = cards.size > 0 || !settingsView.hidden;
 }
 
 let gotEvent = false;
@@ -177,11 +200,17 @@ function flashInvalid() {
   invalidTimer = setTimeout(() => nameInput.classList.remove("invalid"), 1000);
 }
 
+// True while an add_patient call is on its way, so a double-click on an
+// add button cannot add the same patient twice.
+let adding = false;
+
 async function addPatient(protocol) {
+  if (adding) return;
   const label = nameInput.value.trim();
   if (!label) {
     flashInvalid();
   } else {
+    adding = true;
     try {
       await invoke("add_patient", { label, protocol });
       nameInput.value = "";
@@ -189,6 +218,8 @@ async function addPatient(protocol) {
       // Rust refused the label (e.g. too long); keep it so it can be fixed.
       flashInvalid();
       console.error(err);
+    } finally {
+      adding = false;
     }
   }
   nameInput.focus();
@@ -201,15 +232,87 @@ function setIntervalLabel(minutes) {
   addThree.textContent = `3 krople co ${minutes} min`;
 }
 
+// ---- Settings view -------------------------------------------------------
+//
+// Shown in place of the cards. Each field saves on "change". Rust applies
+// new durations only to phases that start after the change.
+
+const intervalInput = $("interval-minutes");
+const waitInput = $("wait-minutes");
+const autostartBox = $("autostart");
+const settingsStatus = $("settings-status");
+
 async function loadSettings() {
   try {
     const s = await invoke("get_settings");
+    intervalInput.value = s.interval_minutes;
+    waitInput.value = s.wait_minutes;
+    autostartBox.checked = s.autostart;
     setIntervalLabel(s.interval_minutes);
+    settingsStatus.textContent = "";
   } catch (err) {
+    settingsStatus.textContent = "Nie udało się wczytać ustawień";
     console.error(err);
   }
 }
+// Once at startup too, for the "3 krople co {interval} min" label.
 loadSettings();
+
+// Saves a whole number of minutes in 1..max; returns true when saved.
+async function saveMinutes(input, command, max) {
+  const minutes = Number(input.value);
+  if (input.value.trim() === "" || !Number.isInteger(minutes) || minutes < 1 || minutes > max) {
+    settingsStatus.textContent = `Podaj liczbę od 1 do ${max}`;
+    return false;
+  }
+  try {
+    await invoke(command, { minutes });
+    settingsStatus.textContent = "Zapisano";
+    return true;
+  } catch (err) {
+    settingsStatus.textContent = "Nie udało się zapisać";
+    console.error(err);
+    return false;
+  }
+}
+
+intervalInput.addEventListener("change", async () => {
+  if (await saveMinutes(intervalInput, "set_interval_minutes", 60)) {
+    setIntervalLabel(Number(intervalInput.value));
+  }
+});
+waitInput.addEventListener("change", () => saveMinutes(waitInput, "set_wait_minutes", 120));
+
+autostartBox.addEventListener("change", async () => {
+  try {
+    await invoke("set_autostart", { enabled: autostartBox.checked });
+    settingsStatus.textContent = "Zapisano";
+  } catch (err) {
+    autostartBox.checked = !autostartBox.checked;
+    settingsStatus.textContent = "Nie udało się zapisać";
+    console.error(err);
+  }
+});
+
+// "Zakończ" is a normal click: the only way to quit the app.
+$("btn-quit").addEventListener("click", () => invoke("quit_app").catch(logError));
+
+function showSettings(open) {
+  settingsView.hidden = !open;
+  grid.hidden = open;
+  updateEmpty();
+  // The add row stays visible but cannot be used while settings are open.
+  for (const control of [nameInput, addOne, addThree]) control.disabled = open;
+  if (open) {
+    loadSettings();
+    intervalInput.focus();
+  } else {
+    focusName();
+  }
+}
+
+$("btn-settings").addEventListener("click", () => showSettings(settingsView.hidden));
+$("btn-back").addEventListener("click", () => showSettings(false));
 
 // ---- Top bar and focus ---------------------------------------------------
 
