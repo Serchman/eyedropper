@@ -9,12 +9,22 @@ export const HOLD_MS = 1500;
 
 const isHoldKey = (e) => e.key === " " || e.key === "Enter";
 
+// Buttons being held right now, across all holdToConfirm buttons.
+const held = new Set();
+
+// True while any button is being held. Code that moves focus checks this
+// first: taking focus away (blur) would cancel the hold.
+export function holdInProgress() {
+  return held.size > 0;
+}
+
 export function holdToConfirm(button, onConfirm) {
   let timer = null;
 
   function start() {
     if (timer !== null) return; // already holding (e.g. mouse and key)
     button.classList.add("holding");
+    held.add(button);
     timer = setTimeout(() => {
       timer = null; // already fired, nothing to clear
       reset();
@@ -26,6 +36,7 @@ export function holdToConfirm(button, onConfirm) {
   function reset() {
     if (timer !== null) clearTimeout(timer);
     timer = null;
+    held.delete(button);
     button.classList.remove("holding");
   }
 

@@ -4,7 +4,7 @@
 // that Rust sends about once a second (see src-tauri/src/timers.rs for why).
 
 import { cardView, PIE_CIRCUMFERENCE } from "./card.js";
-import { holdToConfirm } from "./hold.js";
+import { holdToConfirm, holdInProgress } from "./hold.js";
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -320,8 +320,13 @@ $("btn-minimize").addEventListener("click", () => getCurrentWindow().minimize())
 
 // The name field is ready for typing whenever the window comes up, but not
 // while the settings view is open.
+//
+// When the window is behind another app and a card button is pressed, the
+// press starts a hold before the window's "focused" event arrives. Moving
+// focus to the name field then would blur the button and cancel the hold,
+// so the field is left alone while a hold is in progress.
 function focusName() {
-  if (settingsView.hidden) nameInput.focus();
+  if (settingsView.hidden && !holdInProgress()) nameInput.focus();
 }
 focusName();
 getCurrentWindow().onFocusChanged(({ payload: focused }) => {

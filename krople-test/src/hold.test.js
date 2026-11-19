@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { HOLD_MS, holdToConfirm } from "./hold.js";
+import { HOLD_MS, holdToConfirm, holdInProgress } from "./hold.js";
 
 // A stand-in for a <button>: real events (Node's EventTarget), a classList
 // and isConnected. Enough for holdToConfirm, no DOM library needed.
@@ -132,4 +132,22 @@ test("a button removed from the page mid-hold does not confirm", (t) => {
   t.mock.timers.tick(HOLD_MS);
   assert.equal(count(), 0);
   assert.ok(!button.holding);
+});
+
+test("holdInProgress is true only while some button is held", (t) => {
+  const { button } = setup(t);
+  const other = new FakeButton();
+  holdToConfirm(other, () => {});
+  assert.equal(holdInProgress(), false);
+  press(button);
+  press(other);
+  assert.equal(holdInProgress(), true);
+  fire(other, "pointerup");
+  assert.equal(holdInProgress(), true, "the first button is still held");
+  t.mock.timers.tick(HOLD_MS); // first button confirms and resets
+  assert.equal(holdInProgress(), false);
+  press(button);
+  button.isConnected = false;
+  t.mock.timers.tick(HOLD_MS); // removed mid-hold: still cleared
+  assert.equal(holdInProgress(), false);
 });
