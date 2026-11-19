@@ -1,14 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "icon-window",
-  "description": "The floating icon: receive state, report what it shows, be dragged, open the main window.",
+  "description": "The floating icon: receive state, be dragged, open the main window.",
   "windows": ["icon"],
   "permissions": [
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "core:window:allow-start-dragging",
     "allow-get-state",
-    "allow-report-shown",
     "allow-show-main"
   ]
 }

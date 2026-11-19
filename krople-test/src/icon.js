@@ -14,9 +14,6 @@ const count = document.getElementById("count");
 function render(state) {
   count.textContent = String(state.ready_count);
   badge.classList.toggle("ready", state.ready_count > 0);
-  // Tell Rust what we now show, for the consistency log in the terminal.
-  const readyIds = state.timers.filter((t) => t.ready).map((t) => t.id);
-  invoke("report_shown", { readyIds }).catch(() => {});
 }
 
 listen("state", (event) => render(event.payload));

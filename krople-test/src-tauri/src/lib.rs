@@ -10,19 +10,23 @@
 
 mod timers;
 
+use std::time::Duration;
+
 use serde::Serialize;
 use tauri::{AppHandle, Manager, PhysicalPosition, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartExt};
 use tauri_plugin_store::StoreExt;
 use tauri_plugin_window_state::{AppHandleExt, StateFlags, WindowExt};
 
-use timers::TimerState;
+use timers::{Durations, TimerState};
 
 /// The settings file, saved by the store plugin in the app's data folder.
 /// It only ever holds settings, never patient data.
 const SETTINGS_FILE: &str = "settings.json";
 const WAIT_MINUTES_KEY: &str = "waitMinutes";
 const DEFAULT_WAIT_MINUTES: u32 = 15;
+const INTERVAL_MINUTES_KEY: &str = "intervalMinutes";
+const DEFAULT_INTERVAL_MINUTES: u32 = 10;
 
 /// The window-state plugin remembers only the icon window, and only its
 /// position.
@@ -49,19 +53,20 @@ pub fn run() {
         .manage(TimerState::default())
         .invoke_handler(tauri::generate_handler![
             timers::get_state,
-            timers::report_shown,
-            timers::add_timer,
-            timers::remove_timer,
-            timers::expire_all,
+            timers::add_patient,
+            timers::mark_drop,
+            timers::remove_patient,
             show_main,
             quit_app,
             get_settings,
+            set_interval_minutes,
             set_wait_minutes,
             set_autostart,
         ])
         .setup(|app| {
             ensure_icon_on_screen(app.handle());
-            timers::start_ticker(app.handle().clone());            Ok(())
+            timers::start_ticker(app.handle().clone());
+            Ok(())
         })
         .on_window_event(|window, event| match (window.label(), event) {
             // Closing the main window with X quits the whole app, the same as
@@ -174,21 +179,50 @@ fn quit_app(app: AppHandle) {
 
 #[derive(Serialize)]
 struct Settings {
+    interval_minutes: u32,
     wait_minutes: u32,
     autostart: bool,
+}
+
+/// Reads one "minutes" setting, falling back to `default` when the store or
+/// the value is missing.
+fn read_minutes(app: &AppHandle, key: &str, default: u32) -> u32 {
+    app.store(SETTINGS_FILE)
+        .ok()
+        .and_then(|store| store.get(key))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .unwrap_or(default)
+}
+
+/// The phase lengths a phase starting right now should use.
+pub(crate) fn current_durations(app: &AppHandle) -> Durations {
+    let minutes = |key, default| Duration::from_secs(read_minutes(app, key, default) as u64 * 60);
+    Durations {
+        interval: minutes(INTERVAL_MINUTES_KEY, DEFAULT_INTERVAL_MINUTES),
+        wait: minutes(WAIT_MINUTES_KEY, DEFAULT_WAIT_MINUTES),
+    }
 }
 
 /// Loads the settings for the settings panel.
 #[tauri::command]
 fn get_settings(app: AppHandle) -> Result<Settings, String> {
-    let store = app.store(SETTINGS_FILE).map_err(|e| e.to_string())?;
-    let wait_minutes = store
-        .get(WAIT_MINUTES_KEY)
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u32)
-        .unwrap_or(DEFAULT_WAIT_MINUTES);
+    let interval_minutes = read_minutes(&app, INTERVAL_MINUTES_KEY, DEFAULT_INTERVAL_MINUTES);
+    let wait_minutes = read_minutes(&app, WAIT_MINUTES_KEY, DEFAULT_WAIT_MINUTES);
     let autostart = app.autolaunch().is_enabled().unwrap_or(false);
-    Ok(Settings { wait_minutes, autostart })
+    Ok(Settings { interval_minutes, wait_minutes, autostart })
+}
+
+/// Saves the time between drops to the settings file. Only phases started
+/// after the change use it.
+#[tauri::command]
+fn set_interval_minutes(app: AppHandle, minutes: u32) -> Result<(), String> {
+    if !(1..=60).contains(&minutes) {
+        return Err("value out of range".into());
+    }
+    let store = app.store(SETTINGS_FILE).map_err(|e| e.to_string())?;
+    store.set(INTERVAL_MINUTES_KEY, minutes);
+    store.save().map_err(|e| e.to_string())
 }
 
 /// Saves "Czas oczekiwania, min" to the settings file.

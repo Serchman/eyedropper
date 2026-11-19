@@ -1,6 +1,6 @@
-//! Timer state and the once-a-second ticker.
+//! Patient state and the once-a-second ticker.
 //!
-//! WHY THE TIMERS LIVE IN RUST (and not in JavaScript):
+//! WHY THE PATIENT PHASES LIVE IN RUST (and not in JavaScript):
 //!
 //! Windows (and WebView2) throttle JavaScript in minimized or hidden windows.
 //! `setTimeout`/`setInterval` in a minimized main window can fire seconds or
@@ -8,54 +8,113 @@
 //! turn the icon red late. Sending events from one window to the other has the
 //! same problem, because the sending window is the throttled one.
 //!
-//! So Rust owns the one true list of timers. A plain Rust thread is not
-//! throttled. About once a second it works out which timers have run out and
-//! sends ONE `state` event with `{ timers, ready_count, now }` to BOTH windows.
-//! The windows never keep their own timers. They only draw what they receive.
+//! So Rust owns the one true list of patients. A plain Rust thread is not
+//! throttled. About once a second it works out which patients are due and
+//! sends ONE `state` event with `{ patients, ready_count, now }` to BOTH
+//! windows. The windows never keep their own timers. They only draw what they
+//! receive.
 //!
-//! Each timer stores only its end time (`ends_at`). Remaining or overdue time
-//! is always calculated as `ends_at - now`, never by counting ticks, so a late
-//! or skipped tick can't make a timer drift.
+//! Each patient stores only the end time of the current phase
+//! (`phase_ends_at`). Remaining or overdue time is always calculated as
+//! `phase_ends_at - now`, never by counting ticks, so a late or skipped tick
+//! can't make a phase drift.
 //!
 //! We use `SystemTime` (the wall clock) and not `Instant` (a monotonic clock).
 //! On Windows a monotonic clock may not advance while the laptop sleeps. With
-//! the wall clock, a timer that ran out during sleep is already "ready" on the
+//! the wall clock, a phase that ended during sleep is already "ready" on the
 //! first tick after wake-up, so the icon turns red right away.
 //!
-//! Patient data note: timer labels exist ONLY in this in-memory list. They are
-//! never written to disk and are gone when the app quits.
+//! Phase durations come from the settings at the moment a phase STARTS and are
+//! stored as an end time, so changing a setting never alters a running phase.
+//!
+//! Patient data note: labels exist ONLY in this in-memory list. They are
+//! never written to disk, never logged, and are gone when the app quits.
 
-use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
-/// One timer, as Rust keeps it.
-struct Timer {
-    id: u64,
-    label: String,
-    /// The moment the timer runs out (wall clock).
-    ends_at: SystemTime,
-    /// When the ticker first saw this timer as run out (for the log).
-    detected_at: Option<SystemTime>,
-    /// Window label ("icon"/"main") -> when that window first reported
-    /// showing this timer as run out (for the log).
-    shown_at: HashMap<String, SystemTime>,
+/// Longest allowed patient label, in Unicode characters.
+const MAX_LABEL_CHARS: usize = 20;
+
+/// How many drops the 3-drop protocol gives before the final wait.
+const THREE_DROPS: u8 = 3;
+
+/// "1 kropla" or "3 krople". Sent to and from the windows as "one"/"three".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    One,
+    Three,
 }
 
-/// What a window last told us it is showing.
-struct ShownReport {
-    ready_count: usize,
-    received_at: SystemTime,
+/// Phase lengths read from the settings when a phase starts.
+#[derive(Clone, Copy, Debug)]
+pub struct Durations {
+    /// Time between drops (3-drop protocol).
+    pub interval: Duration,
+    /// Time to wait after the last drop before the examination.
+    pub wait: Duration,
+}
+
+/// One patient, as Rust keeps it.
+struct Patient {
+    id: u64,
+    label: String,
+    protocol: Protocol,
+    drops_given: u8,
+    /// When the current phase began (wall clock).
+    phase_started_at: SystemTime,
+    /// The moment the current phase ends (wall clock).
+    phase_ends_at: SystemTime,
+}
+
+impl Patient {
+    /// A patient is red (needs attention) once the current phase has ended.
+    fn is_red(&self, now: SystemTime) -> bool {
+        self.phase_ends_at <= now
+    }
+}
+
+/// Trims the label and checks it is 1-20 Unicode characters.
+fn validate_label(raw: &str) -> Result<String, String> {
+    let label = raw.trim();
+    let len = label.chars().count();
+    if len == 0 || len > MAX_LABEL_CHARS {
+        return Err("invalid label".into());
+    }
+    Ok(label.to_string())
+}
+
+/// Adding a patient means the first drop was just given.
+fn new_patient(id: u64, label: String, protocol: Protocol, now: SystemTime, d: Durations) -> Patient {
+    let phase = match protocol {
+        Protocol::Three => d.interval,
+        Protocol::One => d.wait,
+    };
+    Patient { id, label, protocol, drops_given: 1, phase_started_at: now, phase_ends_at: now + phase }
+}
+
+/// "Zakropione": the next drop was given (also allowed before it is due).
+/// Starts the next phase now: another interval, or the final wait after the
+/// third drop.
+fn give_drop(p: &mut Patient, now: SystemTime, d: Durations) -> Result<(), String> {
+    if p.protocol != Protocol::Three || p.drops_given >= THREE_DROPS {
+        return Err("no more drops to give".into());
+    }
+    p.drops_given += 1;
+    let phase = if p.drops_given < THREE_DROPS { d.interval } else { d.wait };
+    p.phase_started_at = now;
+    p.phase_ends_at = now + phase;
+    Ok(())
 }
 
 #[derive(Default)]
 struct Inner {
-    timers: Vec<Timer>,
+    patients: Vec<Patient>,
     next_id: u64,
-    reports: HashMap<String, ShownReport>,
     /// Set when the icon window moved, so the ticker saves its position.
     icon_moved: bool,
 }
@@ -71,23 +130,26 @@ impl TimerState {
     }
 }
 
-/// One timer, as sent to the windows. Times are milliseconds since 1970
+/// One patient, as sent to the windows. Times are milliseconds since 1970
 /// (the same format as JavaScript's `Date.now()`).
 #[derive(Serialize, Clone)]
-pub struct TimerDto {
+pub struct PatientDto {
     id: u64,
     label: String,
-    ends_at: u64,
+    protocol: Protocol,
+    drops_given: u8,
+    phase_started_at: u64,
+    phase_ends_at: u64,
     ready: bool,
 }
 
 /// The payload of the `state` event and of the `get_state` command.
 #[derive(Serialize, Clone)]
 pub struct StatePayload {
-    timers: Vec<TimerDto>,
+    patients: Vec<PatientDto>,
     ready_count: usize,
-    /// Rust's "now". Windows compute remaining time as `ends_at - now`, so
-    /// both windows and Rust always agree on which timers have run out.
+    /// Rust's "now". Windows compute remaining time as `phase_ends_at - now`,
+    /// so both windows and Rust always agree on which patients are due.
     now: u64,
 }
 
@@ -96,22 +158,22 @@ fn ms(t: SystemTime) -> u64 {
 }
 
 impl Inner {
-    /// Builds the payload and records when each timer was first seen as run out.
-    fn snapshot(&mut self, now: SystemTime) -> StatePayload {
-        let mut ready_count = 0;
-        let timers = self
-            .timers
-            .iter_mut()
-            .map(|t| {
-                let ready = t.ends_at <= now;
-                if ready {
-                    ready_count += 1;
-                    t.detected_at.get_or_insert(now);
-                }
-                TimerDto { id: t.id, label: t.label.clone(), ends_at: ms(t.ends_at), ready }
+    fn snapshot(&self, now: SystemTime) -> StatePayload {
+        let patients: Vec<PatientDto> = self
+            .patients
+            .iter()
+            .map(|p| PatientDto {
+                id: p.id,
+                label: p.label.clone(),
+                protocol: p.protocol,
+                drops_given: p.drops_given,
+                phase_started_at: ms(p.phase_started_at),
+                phase_ends_at: ms(p.phase_ends_at),
+                ready: p.is_red(now),
             })
             .collect();
-        StatePayload { timers, ready_count, now: ms(now) }
+        let ready_count = patients.iter().filter(|p| p.ready).count();
+        StatePayload { patients, ready_count, now: ms(now) }
     }
 }
 
@@ -125,73 +187,22 @@ fn broadcast(app: &AppHandle) {
 
 /// Starts the background thread that ticks about once a second.
 pub fn start_ticker(app: AppHandle) {
-    std::thread::spawn(move || {
-        let mut last_log = SystemTime::now();
-        loop {
-            std::thread::sleep(Duration::from_secs(1));
-            let now = SystemTime::now();
-            let state = app.state::<TimerState>();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let state = app.state::<TimerState>();
 
-            let (payload, icon_moved) = {
-                let mut inner = state.0.lock().unwrap();
-                let payload = inner.snapshot(now);
-                let moved = std::mem::take(&mut inner.icon_moved);
-                (payload, moved)
-            };
-            let _ = app.emit("state", payload);
+        let (payload, icon_moved) = {
+            let mut inner = state.0.lock().unwrap();
+            let payload = inner.snapshot(SystemTime::now());
+            let moved = std::mem::take(&mut inner.icon_moved);
+            (payload, moved)
+        };
+        let _ = app.emit("state", payload);
 
-            if icon_moved {
-                crate::save_icon_position(&app);
-            }
-
-            // `duration_since` fails if the clock went backwards; then we just
-            // log now and restart the 10 s count.
-            if now.duration_since(last_log).map_or(true, |d| d >= Duration::from_secs(10)) {
-                last_log = now;
-                print_consistency_log(&state.0.lock().unwrap(), now);
-            }
+        if icon_moved {
+            crate::save_icon_position(&app);
         }
     });
-}
-
-/// Prints Rust's view versus what each window reports it is showing.
-/// Each webview has its own devtools console, so no single console can see
-/// both windows. Printing here, in the `tauri dev` terminal, puts everything
-/// in one place.
-fn print_consistency_log(inner: &Inner, now: SystemTime) {
-    let rust_ready = inner.timers.iter().filter(|t| t.ends_at <= now).count();
-    let fmt_time = |t: SystemTime| {
-        chrono::DateTime::<chrono::Local>::from(t).format("%H:%M:%S%.3f").to_string()
-    };
-    // Delay of `t` after `base`, as "+0.42 s", or "-0.10 s" if earlier.
-    let delay = |t: SystemTime, base: SystemTime| match t.duration_since(base) {
-        Ok(d) => format!("+{:.2} s", d.as_secs_f64()),
-        Err(e) => format!("-{:.2} s", e.duration().as_secs_f64()),
-    };
-    let window_report = |label: &str| match inner.reports.get(label) {
-        Some(r) => {
-            let age = now.duration_since(r.received_at).unwrap_or_default().as_secs_f64();
-            let mark = if r.ready_count == rust_ready { "OK" } else { "MISMATCH" };
-            format!("{} (reported {:.1} s ago) {}", r.ready_count, age, mark)
-        }
-        None => "no report yet".to_string(),
-    };
-
-    println!("[krople {}] ready count: Rust {} | icon {} | main {}",
-        fmt_time(now), rust_ready, window_report("icon"), window_report("main"));
-
-    for t in inner.timers.iter().filter(|t| t.ends_at <= now) {
-        let shown = |label: &str| match t.shown_at.get(label) {
-            Some(at) => delay(*at, t.ends_at),
-            None => "not yet".to_string(),
-        };
-        println!("    {}: expected red at {} | Rust saw it {} | icon showed it {} | main showed it {}",
-            t.label,
-            fmt_time(t.ends_at),
-            t.detected_at.map_or("not yet".to_string(), |d| delay(d, t.ends_at)),
-            shown("icon"),
-            shown("main"));
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -206,62 +217,165 @@ pub fn get_state(state: tauri::State<TimerState>) -> StatePayload {
     state.0.lock().unwrap().snapshot(SystemTime::now())
 }
 
-/// A window tells Rust which timers it is currently showing as run out.
-/// Used only for the consistency log.
+/// Adds a patient whose first drop was just given.
 #[tauri::command]
-pub fn report_shown(
-    window: tauri::WebviewWindow,
+pub fn add_patient(
+    app: AppHandle,
     state: tauri::State<TimerState>,
-    ready_ids: Vec<u64>,
-) {
-    let label = window.label().to_string();
-    let now = SystemTime::now();
-    let mut inner = state.0.lock().unwrap();
-    for t in inner.timers.iter_mut().filter(|t| ready_ids.contains(&t.id)) {
-        t.shown_at.entry(label.clone()).or_insert(now);
-    }
-    inner.reports.insert(label, ShownReport { ready_count: ready_ids.len(), received_at: now });
-}
-
-/// Adds a timer that runs out `seconds` from now.
-#[tauri::command]
-pub fn add_timer(app: AppHandle, state: tauri::State<TimerState>, seconds: u64) -> Result<(), String> {
-    // The test buttons only send 30 or 120. Reject anything odd anyway.
-    if !(1..=24 * 3600).contains(&seconds) {
-        return Err("invalid duration".into());
-    }
+    label: String,
+    protocol: Protocol,
+) -> Result<(), String> {
+    let label = validate_label(&label)?;
+    // Read the settings BEFORE taking the lock, so file access never blocks
+    // the ticker.
+    let durations = crate::current_durations(&app);
     {
         let mut inner = state.0.lock().unwrap();
         inner.next_id += 1;
         let id = inner.next_id;
-        inner.timers.push(Timer {
-            id,
-            label: format!("Timer {id}"),
-            ends_at: SystemTime::now() + Duration::from_secs(seconds),
-            detected_at: None,
-            shown_at: HashMap::new(),
-        });
+        inner.patients.push(new_patient(id, label, protocol, SystemTime::now(), durations));
     } // the lock is released here, before broadcast() locks again
     broadcast(&app);
     Ok(())
 }
 
-/// Removes one timer.
+/// "Zakropione": the next drop was given.
 #[tauri::command]
-pub fn remove_timer(app: AppHandle, state: tauri::State<TimerState>, id: u64) {
-    state.0.lock().unwrap().timers.retain(|t| t.id != id);
+pub fn mark_drop(app: AppHandle, state: tauri::State<TimerState>, id: u64) -> Result<(), String> {
+    let durations = crate::current_durations(&app);
+    {
+        let mut inner = state.0.lock().unwrap();
+        let patient = inner.patients.iter_mut().find(|p| p.id == id).ok_or("unknown patient")?;
+        give_drop(patient, SystemTime::now(), durations)?;
+    }
+    broadcast(&app);
+    Ok(())
+}
+
+/// "Zbadany" / "x": removes one patient.
+#[tauri::command]
+pub fn remove_patient(app: AppHandle, state: tauri::State<TimerState>, id: u64) {
+    state.0.lock().unwrap().patients.retain(|p| p.id != id);
     broadcast(&app);
 }
 
-/// "Wymuś koniec": makes every running timer run out right now.
-#[tauri::command]
-pub fn expire_all(app: AppHandle, state: tauri::State<TimerState>) {
-    {
-        let now = SystemTime::now();
-        let mut inner = state.0.lock().unwrap();
-        for t in inner.timers.iter_mut().filter(|t| t.ends_at > now) {
-            t.ends_at = now;
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t0() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_000_000)
     }
-    broadcast(&app);
+    fn d() -> Durations {
+        Durations { interval: Duration::from_secs(600), wait: Duration::from_secs(900) }
+    }
+    fn s(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    #[test]
+    fn one_drop_starts_waiting() {
+        let p = new_patient(1, "A.K.".into(), Protocol::One, t0(), d());
+        assert_eq!(p.drops_given, 1);
+        assert_eq!(p.phase_started_at, t0());
+        assert_eq!(p.phase_ends_at, t0() + s(900));
+        assert!(!p.is_red(t0() + s(899)));
+    }
+
+    #[test]
+    fn one_drop_ready_after_wait() {
+        let p = new_patient(1, "A.K.".into(), Protocol::One, t0(), d());
+        assert!(p.is_red(t0() + s(900)));
+        assert!(p.is_red(t0() + s(3600)));
+    }
+
+    #[test]
+    fn three_drops_first_interval() {
+        let p = new_patient(1, "A.K.".into(), Protocol::Three, t0(), d());
+        assert_eq!(p.drops_given, 1);
+        assert_eq!(p.phase_ends_at, t0() + s(600));
+        assert!(!p.is_red(t0() + s(599)));
+        assert!(p.is_red(t0() + s(600)));
+    }
+
+    #[test]
+    fn three_drops_second_drop() {
+        let mut p = new_patient(1, "A.K.".into(), Protocol::Three, t0(), d());
+        give_drop(&mut p, t0() + s(650), d()).unwrap();
+        assert_eq!(p.drops_given, 2);
+        assert_eq!(p.phase_started_at, t0() + s(650));
+        assert_eq!(p.phase_ends_at, t0() + s(1250));
+    }
+
+    #[test]
+    fn three_drops_third_drop_starts_wait() {
+        let mut p = new_patient(1, "A.K.".into(), Protocol::Three, t0(), d());
+        give_drop(&mut p, t0() + s(650), d()).unwrap();
+        give_drop(&mut p, t0() + s(1300), d()).unwrap();
+        assert_eq!(p.drops_given, 3);
+        assert_eq!(p.phase_ends_at, t0() + s(1300 + 900));
+        assert!(p.is_red(t0() + s(1300 + 900)));
+    }
+
+    #[test]
+    fn early_drop_allowed() {
+        let mut p = new_patient(1, "A.K.".into(), Protocol::Three, t0(), d());
+        assert!(give_drop(&mut p, t0() + s(60), d()).is_ok());
+        assert_eq!(p.drops_given, 2);
+        assert_eq!(p.phase_ends_at, t0() + s(660));
+    }
+
+    #[test]
+    fn mark_drop_rejects() {
+        let mut one = new_patient(1, "A".into(), Protocol::One, t0(), d());
+        assert!(give_drop(&mut one, t0() + s(10), d()).is_err());
+        assert_eq!(one.drops_given, 1);
+        assert_eq!(one.phase_started_at, t0());
+        assert_eq!(one.phase_ends_at, t0() + s(900));
+
+        let mut three = new_patient(2, "B".into(), Protocol::Three, t0(), d());
+        give_drop(&mut three, t0() + s(10), d()).unwrap();
+        give_drop(&mut three, t0() + s(20), d()).unwrap();
+        let ends = three.phase_ends_at;
+        assert!(give_drop(&mut three, t0() + s(30), d()).is_err());
+        assert_eq!(three.drops_given, 3);
+        assert_eq!(three.phase_ends_at, ends);
+    }
+
+    #[test]
+    fn durations_are_captured_at_phase_start() {
+        let other = new_patient(2, "B".into(), Protocol::Three, t0(), d());
+        let mut p = new_patient(1, "A".into(), Protocol::Three, t0(), d());
+        let changed = Durations { interval: s(120), wait: s(60) };
+        give_drop(&mut p, t0() + s(100), changed).unwrap();
+        assert_eq!(p.phase_ends_at, t0() + s(100 + 120));
+        assert_eq!(other.phase_ends_at, t0() + s(600));
+        give_drop(&mut p, t0() + s(200), changed).unwrap();
+        assert_eq!(p.phase_ends_at, t0() + s(200 + 60));
+    }
+
+    #[test]
+    fn is_red_boundary() {
+        let p = new_patient(1, "A".into(), Protocol::One, t0(), d());
+        assert!(p.is_red(p.phase_ends_at));
+        assert!(!p.is_red(p.phase_ends_at - Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn label_validation() {
+        assert_eq!(validate_label("  A.K.  "), Ok("A.K.".to_string()));
+        assert!(validate_label("").is_err());
+        assert!(validate_label("   ").is_err());
+        assert!(validate_label("Żółć").is_ok());
+        assert!(validate_label(&"ą".repeat(20)).is_ok());
+        assert!(validate_label(&"ą".repeat(21)).is_err());
+        assert!(validate_label(&"a".repeat(21)).is_err());
+    }
+
+    #[test]
+    fn protocol_json() {
+        assert_eq!(serde_json::to_string(&Protocol::Three).unwrap(), "\"three\"");
+        assert_eq!(serde_json::from_str::<Protocol>("\"one\"").unwrap(), Protocol::One);
+        assert!(serde_json::from_str::<Protocol>("\"two\"").is_err());
+    }
 }
