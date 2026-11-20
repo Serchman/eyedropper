@@ -1,0 +1,61 @@
+name: Build Windows installer
+
+on:
+  # Run by hand from the Actions tab (any branch).
+  workflow_dispatch:
+  # Build on every push to main and on version tags like v0.2.0.
+  push:
+    branches: [main]
+    tags: ["v*"]
+  # Build pull requests so problems show up before merging.
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: krople-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: krople-test/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: krople-test/src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Frontend tests
+        run: npm test
+
+      - name: Rust tests
+        working-directory: krople-test/src-tauri
+        run: cargo test --locked
+
+      - name: Build installer
+        run: npm run build
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: krople-installer-${{ github.sha }}
+          path: krople-test/src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 30
