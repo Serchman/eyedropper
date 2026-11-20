@@ -2,7 +2,9 @@
   "name": "krople-test",
   "private": true,
   "version": "0.1.0",
+  "type": "module",
   "scripts": {
+    "test": "node --test src/",
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build"

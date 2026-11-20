@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-interval-minutes"
+description = "Enables the set_interval_minutes command without any pre-configured scope."
+commands.allow = ["set_interval_minutes"]
+
+[[permission]]
+identifier = "deny-set-interval-minutes"
+description = "Denies the set_interval_minutes command without any pre-configured scope."
+commands.deny = ["set_interval_minutes"]
