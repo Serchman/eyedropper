@@ -3,10 +3,9 @@ name: Build Windows installer
 on:
   # Run by hand from the Actions tab (any branch).
   workflow_dispatch:
-  # Build on every push to main and on version tags like v0.2.0.
+  # Build on every push to main (version tags are handled by release.yml).
   push:
     branches: [main]
-    tags: ["v*"]
   # Build pull requests so problems show up before merging.
   pull_request:
 

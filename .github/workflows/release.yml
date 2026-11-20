@@ -1,0 +1,76 @@
+name: Release
+
+# Publishes a GitHub Release with the Windows installer attached.
+# Trigger: push a tag that matches the app version, e.g.
+#   git tag v0.2.0 && git push origin v0.2.0
+# A tag with a suffix (v0.2.0-beta.1) is published as a pre-release.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: krople-test
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches app version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          app=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [ "$tag" != "$app" ] && [ "${tag%%-*}" != "$app" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $app in tauri.conf.json"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: krople-test/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: krople-test/src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Frontend tests
+        run: npm test
+
+      # --release so the tests reuse the libraries the installer build needs.
+      - name: Rust tests
+        working-directory: krople-test/src-tauri
+        run: cargo test --release --locked
+
+      - name: Build installer
+        run: npm run build
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" \
+            src-tauri/target/release/bundle/nsis/*-setup.exe \
+            --title "Krople $GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag \
+            $prerelease
