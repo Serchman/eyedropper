@@ -4,6 +4,8 @@
 // changes a CSS class: it never shows, focuses, moves or activates any
 // window, so keystrokes typed into DrEryk keep going to DrEryk.
 
+import { isOutdated } from "./state.js";
+
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 const { getCurrentWindow } = window.__TAURI__.window;
@@ -11,12 +13,14 @@ const { getCurrentWindow } = window.__TAURI__.window;
 const badge = document.getElementById("badge");
 const count = document.getElementById("count");
 
+let latest = null;
+
 function render(state) {
+  // Same ordering rule as the main window (see state.js).
+  if (isOutdated(latest, state)) return;
+  latest = state;
   count.textContent = String(state.ready_count);
   badge.classList.toggle("ready", state.ready_count > 0);
-  // Tell Rust what we now show, for the consistency log in the terminal.
-  const readyIds = state.timers.filter((t) => t.ready).map((t) => t.id);
-  invoke("report_shown", { readyIds }).catch(() => {});
 }
 
 listen("state", (event) => render(event.payload));

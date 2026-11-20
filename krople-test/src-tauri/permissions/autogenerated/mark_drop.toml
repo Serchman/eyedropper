@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-mark-drop"
+description = "Enables the mark_drop command without any pre-configured scope."
+commands.allow = ["mark_drop"]
+
+[[permission]]
+identifier = "deny-mark-drop"
+description = "Denies the mark_drop command without any pre-configured scope."
+commands.deny = ["mark_drop"]

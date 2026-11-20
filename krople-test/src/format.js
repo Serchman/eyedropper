@@ -10,3 +10,11 @@ export function formatTime(diffMs) {
   const s = String(totalSec % 60).padStart(2, "0");
   return (overdue ? "+" : "") + `${m}:${s}`;
 }
+
+// Formats how long a phase has been over (now minus end time) as whole
+// minutes, counting up from "+0": 0..59 s -> "+0", 60 s -> "+1".
+// Returned in two parts so the card can draw "min" smaller.
+export function formatOverdue(overdueMs) {
+  const minutes = Math.floor(Math.max(overdueMs, 0) / 60000);
+  return { value: "+" + minutes, unit: "min" };
+}
